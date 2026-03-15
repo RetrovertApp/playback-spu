@@ -1,0 +1,11 @@
+This plugin's integration code (spu_plugin.c and CMakeLists.txt) is
+licensed under the MIT License. See the top-level LICENSE file.
+
+Third-party dependencies:
+=========================
+
+(None)
+
+This plugin is self-contained. The PS-ADPCM decoder is original code
+written for the Retrovert project and is covered by the top-level
+MIT License.
