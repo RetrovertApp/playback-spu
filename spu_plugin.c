@@ -22,6 +22,7 @@
 #include <retrovert/playback.h>
 #include <retrovert/service.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -420,9 +421,51 @@ static void spu_plugin_event(void* user_data, uint8_t* event_data, uint64_t len)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static uint32_t spu_plugin_get_scope_data(void* user_data, int channel, float* buffer, uint32_t num_samples) {
+static bool spu_plugin_get_structure(void* user_data, RVVizInfo* out) {
+    (void)user_data;
+    if (out == nullptr) {
+        return false;
+    }
+    out->caps = RVVizCaps_Scope;
+    out->scroll_mode = RVScrollMode_Synchronized;
+    out->pattern_channel_count = 0;
+    out->scope_channel_count = 1; // mono ADPCM stream
+    out->column_count = 0;
+    return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+static uint32_t spu_plugin_get_scope_channels(void* user_data, RVChannelDesc* out, uint32_t cap) {
+    (void)user_data;
+    if (out == nullptr || cap < 1) {
+        return 0;
+    }
+    memset(out[0].name, 0, sizeof(out[0].name));
+    snprintf((char*)out[0].name, sizeof(out[0].name), "ADPCM");
+    out[0].scope_width = 0;
+    return 1;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+static void spu_plugin_set_scope_enabled(void* user_data, bool on) {
     SpuReplayerData* data = (SpuReplayerData*)user_data;
-    if (data == nullptr || data->adpcm_data == nullptr || buffer == nullptr) {
+    if (data == nullptr) {
+        return;
+    }
+    if (on && !data->scope_enabled) {
+        memset(data->scope_buffer, 0, sizeof(data->scope_buffer));
+        data->scope_write_pos = 0;
+    }
+    data->scope_enabled = on;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+static uint32_t spu_plugin_get_scope_samples(void* user_data, int32_t channel, float* out, uint32_t cap) {
+    SpuReplayerData* data = (SpuReplayerData*)user_data;
+    if (data == nullptr || data->adpcm_data == nullptr || out == nullptr || !data->scope_enabled) {
         return 0;
     }
 
@@ -431,33 +474,17 @@ static uint32_t spu_plugin_get_scope_data(void* user_data, int channel, float* b
         return 0;
     }
 
-    if (!data->scope_enabled) {
-        data->scope_enabled = true;
-        memset(data->scope_buffer, 0, sizeof(data->scope_buffer));
-        data->scope_write_pos = 0;
+    if (cap > SPU_SCOPE_BUFFER_SIZE) {
+        cap = SPU_SCOPE_BUFFER_SIZE;
     }
 
-    if (num_samples > SPU_SCOPE_BUFFER_SIZE) {
-        num_samples = SPU_SCOPE_BUFFER_SIZE;
-    }
-
-    uint32_t read_pos = (data->scope_write_pos - num_samples + SPU_SCOPE_BUFFER_SIZE) & SPU_SCOPE_BUFFER_MASK;
-    for (uint32_t i = 0; i < num_samples; i++) {
-        buffer[i] = data->scope_buffer[read_pos];
+    uint32_t read_pos = (data->scope_write_pos - cap + SPU_SCOPE_BUFFER_SIZE) & SPU_SCOPE_BUFFER_MASK;
+    for (uint32_t i = 0; i < cap; i++) {
+        out[i] = data->scope_buffer[read_pos];
         read_pos = (read_pos + 1) & SPU_SCOPE_BUFFER_MASK;
     }
 
-    return num_samples;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-static uint32_t spu_plugin_get_scope_channel_names(void* user_data, const char** names, uint32_t max_channels) {
-    (void)user_data;
-    if (max_channels < 1)
-        return 0;
-    names[0] = "ADPCM";
-    return 1;
+    return cap;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -479,12 +506,19 @@ static RVPlaybackPlugin g_spu_plugin = {
     spu_plugin_metadata,
     spu_plugin_static_init,
     nullptr, // settings_updated
-    nullptr, // get_tracker_info
-    nullptr, // get_pattern_cell
-    nullptr, // get_pattern_num_rows
-    spu_plugin_get_scope_data,
     nullptr, // static_destroy
-    spu_plugin_get_scope_channel_names,
+
+    // Visualization: scope-only (mono ADPCM stream, no pattern grid).
+    spu_plugin_get_structure,
+    nullptr, // get_columns
+    nullptr, // get_pattern_channels
+    spu_plugin_get_scope_channels,
+    nullptr, // get_position
+    nullptr, // get_channel_rows
+    nullptr, // get_cells
+    spu_plugin_set_scope_enabled,
+    spu_plugin_get_scope_samples,
+    nullptr, // get_vu
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
