@@ -69,6 +69,10 @@ typedef struct SpuReplayerData {
     bool scope_enabled;
     float scope_buffer[SPU_SCOPE_BUFFER_SIZE];
     uint32_t scope_write_pos;
+    int16_t pending_samples[SPU_SAMPLES_PER_BLOCK];
+    uint32_t pending_sample_count;
+    uint32_t pending_sample_offset;
+    bool pending_end;
 } SpuReplayerData;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -165,6 +169,9 @@ static int spu_plugin_open(void* user_data, const char* url, uint32_t subsong, c
     data->file_size = read_res.data_size;
     data->prev1 = 0;
     data->prev2 = 0;
+    data->pending_sample_count = 0;
+    data->pending_sample_offset = 0;
+    data->pending_end = false;
     memset(data->name, 0, sizeof(data->name));
 
     // Check for VAG header
@@ -209,6 +216,9 @@ static void spu_plugin_close(void* user_data) {
     data->current_offset = 0;
     data->prev1 = 0;
     data->prev2 = 0;
+    data->pending_sample_count = 0;
+    data->pending_sample_offset = 0;
+    data->pending_end = false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -272,47 +282,48 @@ static RVReadInfo spu_plugin_read_data(void* user_data, RVReadData dest) {
     }
 
     // Check if we've reached the end
-    if (data->current_offset >= data->adpcm_size) {
+    if (data->pending_sample_offset == data->pending_sample_count && data->current_offset >= data->adpcm_size) {
         return (RVReadInfo) { format, 0, RVReadStatus_Finished};
     }
 
-    uint32_t max_frames = dest.channels_output_max_bytes_size / sizeof(int16_t);
+    uint32_t capacity_frames = dest.channels_output_max_bytes_size / sizeof(int16_t);
+    uint32_t max_frames = dest.info.frame_count < capacity_frames ? dest.info.frame_count : capacity_frames;
     int16_t* output = (int16_t*)dest.channels_output;
     uint32_t frames_written = 0;
     bool end_reached = false;
 
     while (frames_written < max_frames && !end_reached) {
-        if (data->current_offset + SPU_ADPCM_BLOCK_SIZE > data->adpcm_size) {
-            end_reached = true;
-            break;
+        if (data->pending_sample_offset == data->pending_sample_count) {
+            if (data->pending_end || data->current_offset + SPU_ADPCM_BLOCK_SIZE > data->adpcm_size) {
+                end_reached = true;
+                break;
+            }
+
+            int flags = spu_decode_block(data->adpcm_data + data->current_offset, data->pending_samples,
+                                         &data->prev1, &data->prev2);
+            data->current_offset += SPU_ADPCM_BLOCK_SIZE;
+            data->pending_sample_count = SPU_SAMPLES_PER_BLOCK;
+            data->pending_sample_offset = 0;
+            data->pending_end = (flags & 1) && !(flags & 2);
         }
 
-        int16_t samples[SPU_SAMPLES_PER_BLOCK];
-        int flags = spu_decode_block(data->adpcm_data + data->current_offset, samples, &data->prev1, &data->prev2);
-        data->current_offset += SPU_ADPCM_BLOCK_SIZE;
+        uint32_t available = data->pending_sample_count - data->pending_sample_offset;
+        uint32_t requested = max_frames - frames_written;
+        uint32_t samples_to_copy = available < requested ? available : requested;
 
-        // Check for end flag (bit 0 set, bit 1 not set = end without loop)
-        if ((flags & 1) && !(flags & 2)) {
-            end_reached = true;
-        }
-
-        // Copy decoded S16 samples directly to mono output
-        uint32_t samples_to_copy = SPU_SAMPLES_PER_BLOCK;
-        if (frames_written + samples_to_copy > max_frames) {
-            samples_to_copy = max_frames - frames_written;
-        }
-
-        memcpy(&output[frames_written], samples, samples_to_copy * sizeof(int16_t));
+        memcpy(&output[frames_written], &data->pending_samples[data->pending_sample_offset],
+               samples_to_copy * sizeof(int16_t));
 
         // Convert to F32 for scope visualization
         if (data->scope_enabled) {
             for (uint32_t i = 0; i < samples_to_copy; i++) {
                 data->scope_buffer[data->scope_write_pos & SPU_SCOPE_BUFFER_MASK]
-                    = (float)samples[i] / 32768.0f;
+                    = (float)data->pending_samples[data->pending_sample_offset + i] / 32768.0f;
                 data->scope_write_pos++;
             }
         }
 
+        data->pending_sample_offset += samples_to_copy;
         frames_written += samples_to_copy;
     }
 
@@ -348,6 +359,9 @@ static int64_t spu_plugin_seek(void* user_data, int64_t ms) {
     data->prev1 = 0;
     data->prev2 = 0;
     data->current_offset = 0;
+    data->pending_sample_count = 0;
+    data->pending_sample_offset = 0;
+    data->pending_end = false;
 
     // Decode blocks to rebuild filter state
     int16_t dummy[SPU_SAMPLES_PER_BLOCK];
